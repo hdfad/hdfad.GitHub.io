@@ -1,0 +1,367 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Spring Boot 自动装配流程 | NOTES</title>
+<link rel="shortcut icon" href="https://hdfad.github.io/favicon.ico?v=1684988571723">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://hdfad.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="Spring Boot 自动装配流程 | NOTES - Atom Feed" href="https://hdfad.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="spring boot的自动装配过程是spring与spring boot共同完成的bean初始化过程，spring boot提供入口EnableAutoConfiguration注解，spring 提供beanFactory的后置处理器调..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://hdfad.github.io">
+  <img class="avatar" src="https://hdfad.github.io/images/avatar.png?v=1684988571723" alt="">
+  </a>
+  <h1 class="site-title">
+    NOTES
+  </h1>
+  <p class="site-description">
+    
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/index.html" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              Spring Boot 自动装配流程
+            </h2>
+            <div class="post-info">
+              <span>
+                2023-05-11
+              </span>
+              <span>
+                6 min read
+              </span>
+              
+            </div>
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <p>spring boot的自动装配过程是spring与spring boot共同完成的bean初始化过程，spring boot提供入口<code>EnableAutoConfiguration</code>注解，spring 提供<code>beanFactory的后置处理器</code>调用加载到<code>BeanDefinition</code>以及BeanDefinition的对象初始化，和spring的spi查找加载对象和默认元信息</p>
+<p>流程<br>
+spring boot的通过<code>SpringApplication.run</code> 加载spring ioc <code>refresh</code>方法，springboot的 <code>@EnableAutoConfiguration</code>注解<code>@Import</code>了<code>AutoConfigurationImportSelector</code>选择器，这个选择器内部实现了<code>ImportSelector</code>接口，在ioc <code>refresh</code>流程中的<code>invokeBeanFactoryPostProcessors</code>流程中会通过<code>ConfigurationClassParser#processDeferredImportSelectors</code>去回调内部类<code>DeferredImportSelector.Group</code>的<code>selectImports</code>方法，spring boot的<code>AutoConfigurationGroup</code>实现了<code>Group</code>，通过<code>AutoConfigurationImportSelector#selectImports</code>方法根据spring的<code>spi</code>机制获取了当前项目下的<code>META-INF/spring.factories</code>中自动装配的类，以及<code>META-INF/spring-autoconfigure-metadata.properties</code>下的类，<code>spring-autoconfigure-metadata.properties</code>中定义的文件不会在<code>spring.factories</code>中重复加载，会通过<code>AutoConfigurationImportFilter#match</code>过滤掉，避免重复的class文件重复配置<br>
+spring将获取到的对象调用<code>ConfigurationClassParser#processImports</code>进行解析，解析里面的<code>@Import</code>、<code>@ImportResource</code>、<code>@Component</code>、<code>@ComponentScan</code>、<code>@Bean</code>等这个过程是个递归的过程，将解析的结果缓存到不同的集合中，最后在<code>ConfigurationClassPostProcessor#processConfigBeanDefinitions</code>中通过<code>BeanDefinitionReader#loadBeanDefinitions</code>加载bean定义信息等到后续<code>createBean</code>初始化</p>
+<p><strong>spring boot 内部<code>AutoConfigurationGroup</code></strong><br>
+<img src="https://hdfad.github.io/post-images/1683865661995.png" alt="" loading="lazy"></p>
+<p><strong>spring boot 内部的AutoConfigurationImportSelector</strong><br>
+<img src="https://hdfad.github.io/post-images/1683865674900.png" alt="" loading="lazy"></p>
+<p><strong><code>parse</code>解析导入数据中的import</strong></p>
+<pre><code class="language-java">/**
+	 * 解析BeanDefinitionHolder
+	 * @param configCandidates
+	 */
+	public void parse(Set&lt;BeanDefinitionHolder&gt; configCandidates) {
+		...
+		for (BeanDefinitionHolder holder : configCandidates) {
+
+			//获取配置类的bean定义信息
+			BeanDefinition bd = holder.getBeanDefinition();
+			try {
+				/**
+				 * 根据类型解析BeanDefinition
+				 */
+				if (bd instanceof AnnotatedBeanDefinition) {
+					parse(((AnnotatedBeanDefinition) bd).getMetadata(), holder.getBeanName());
+				}
+				else if (bd instanceof AbstractBeanDefinition &amp;&amp; ((AbstractBeanDefinition) bd).hasBeanClass()) {
+					parse(((AbstractBeanDefinition) bd).getBeanClass(), holder.getBeanName());
+				}
+				else {
+					parse(bd.getBeanClassName(), holder.getBeanName());
+				}
+			}
+		}
+		/**
+		 * Import处理
+		 */
+		this.deferredImportSelectorHandler.process();
+	}
+</code></pre>
+<p><strong><code>process</code>处理improt数据</strong></p>
+<pre><code class="language-java">/**
+ *处理deferredImportSelectors中的数据
+*/
+public void process() {
+		...
+    DeferredImportSelectorGroupingHandler handler = new DeferredImportSelectorGroupingHandler();
+	       ...
+				/**
+				 *处理导入
+				*/
+				handler.processGroupImports();
+   ...
+}
+</code></pre>
+<p><strong><code>grouping.getImports()</code>回调<code>selectImports</code>方法</strong></p>
+<pre><code class="language-java">public void processGroupImports() {
+			for (DeferredImportSelectorGrouping grouping : this.groupings.values()) {
+				Predicate&lt;String&gt; exclusionFilter = grouping.getCandidateFilter();
+				/**
+				 * getImports:获取import的bean，spring boot的spi bean 也和这儿相关
+				 */
+				grouping.getImports().forEach(entry -&gt; {
+					ConfigurationClass configurationClass = this.configurationClasses.get(entry.getMetadata());
+					try {
+						/**
+						 * 处理import
+						 */
+						processImports(configurationClass, asSourceClass(configurationClass, exclusionFilter),
+								Collections.singleton(asSourceClass(entry.getImportClassName(), exclusionFilter)),
+								exclusionFilter, false);
+					}
+					
+				});
+			}
+		}
+</code></pre>
+<p>spring boot中<code>getImports</code>处理流程</p>
+<pre><code class="language-java">public class AutoConfigurationImportSelector implements DeferredImportSelector, BeanClassLoaderAware, ResourceLoaderAware, BeanFactoryAware, EnvironmentAware, Ordered {
+
+	/**
+	 * spring boot 内部import流程回调
+	 */
+	private static class DeferredImportSelectorGrouping {
+	
+			public Iterable&lt;Group.Entry&gt; getImports() {
+				...
+				return this.group.selectImports();
+			}
+		}
+}
+</code></pre>
+<p><code>selectImports</code>方法通过spi去获取<code>META-INF/spring.factories</code>⇒<code>(getCandidateConfigurations)</code>和<code>META-INF/spring-autoconfigure-metadata.properties</code> ⇒ <code>(AutoConfigurationMetadataLoader .loadMetadata)</code>中的数据</p>
+<pre><code class="language-java">selectImports:
+//加载META-INF/spring-autoconfigure-metadata.properties
+AutoConfigurationMetadata autoConfigurationMetadata = AutoConfigurationMetadataLoader.loadMetadata(this.beanClassLoader);
+//加载META-INF/spring.factories
+getCandidateConfigurations⇒List&lt;String&gt; configurations = SpringFactoriesLoader.loadFactoryNames(getSpringFactoriesLoaderFactoryClass(), getBeanClassLoader());
+//过滤spring boot会自动装配的元数据信息，避免重复装配
+filter(configurations, autoConfigurationMetadata)
+</code></pre>
+<p>处理完后</p>
+<p><strong><code>doProcessConfigurationClass</code> 解析bean配置信息</strong></p>
+<pre><code class="language-java">protected final SourceClass doProcessConfigurationClass(
+			ConfigurationClass configClass, SourceClass sourceClass, Predicate&lt;String&gt; filter)
+			throws IOException {
+
+		/**
+		 * Component解析启动类或递归中的类
+		 */
+		if (configClass.getMetadata().isAnnotated(Component.class.getName())) {
+			// Recursively process any member (nested) classes first
+			processMemberClasses(configClass, sourceClass, filter);
+		}
+
+		// Process any @PropertySource annotations
+		for (AnnotationAttributes propertySource : AnnotationConfigUtils.attributesForRepeatable(
+				sourceClass.getMetadata(), PropertySources.class,
+				org.springframework.context.annotation.PropertySource.class)) {
+			if (this.environment instanceof ConfigurableEnvironment) {
+				processPropertySource(propertySource);
+			}
+			else {
+			
+			}
+		}
+
+		// Process any @ComponentScan annotations
+		Set&lt;AnnotationAttributes&gt; componentScans = AnnotationConfigUtils.attributesForRepeatable(
+				sourceClass.getMetadata(), ComponentScans.class, ComponentScan.class);
+		if (!componentScans.isEmpty() &amp;&amp;
+				!this.conditionEvaluator.shouldSkip(sourceClass.getMetadata(), ConfigurationPhase.REGISTER_BEAN)) {
+			for (AnnotationAttributes componentScan : componentScans) {
+				
+				/**
+				 * 扫描注入注解，添加到beanfactory容器中，后续需要依赖这个对象时才进行实例化注入
+				 */
+				Set&lt;BeanDefinitionHolder&gt; scannedBeanDefinitions =
+						this.componentScanParser.parse(componentScan, sourceClass.getMetadata().getClassName());
+				// Check the set of scanned definitions for any further config classes and parse recursively if needed
+				for (BeanDefinitionHolder holder : scannedBeanDefinitions) {
+					BeanDefinition bdCand = holder.getBeanDefinition().getOriginatingBeanDefinition();
+					if (bdCand == null) {
+						bdCand = holder.getBeanDefinition();
+					}
+					if (ConfigurationClassUtils.checkConfigurationClassCandidate(bdCand, this.metadataReaderFactory)) {
+						/**
+						 * 递归解析依赖
+						 */
+						parse(bdCand.getBeanClassName(), holder.getBeanName());
+					}
+				}
+			}
+		}
+
+		/**
+		 * 解析@Import注解注入的类，如果是ImportSelector类型或者ImportBeanDefinitionRegistrar类型，则只进行缓存，
+		 * 其他类型就当普通类，解析导入类中的注解信息到beanFactory中
+		 */
+		processImports(configClass, sourceClass, getImports(sourceClass), filter, true);
+
+		/**
+		 * 处理@ImportResource，解析xml，缓存到importedResources中
+		 */
+		AnnotationAttributes importResource =
+				AnnotationConfigUtils.attributesFor(sourceClass.getMetadata(), ImportResource.class);
+		if (importResource != null) {
+			String[] resources = importResource.getStringArray(&quot;locations&quot;);
+			Class&lt;? extends BeanDefinitionReader&gt; readerClass = importResource.getClass(&quot;reader&quot;);
+			for (String resource : resources) {
+				String resolvedResource = this.environment.resolveRequiredPlaceholders(resource);
+				configClass.addImportedResource(resolvedResource, readerClass);
+			}
+		}
+
+		/**
+		 * 解析@bean注解，缓存到beanMethods中
+		 */
+		Set&lt;MethodMetadata&gt; beanMethods = retrieveBeanMethodMetadata(sourceClass);
+		for (MethodMetadata methodMetadata : beanMethods) {
+			configClass.addBeanMethod(new BeanMethod(methodMetadata, configClass));
+		}
+
+		// Process default methods on interfaces
+		processInterfaces(configClass, sourceClass);
+
+		// Process superclass, if any
+		if (sourceClass.getMetadata().hasSuperClass()) {
+			String superclass = sourceClass.getMetadata().getSuperClassName();
+			if (superclass != null &amp;&amp; !superclass.startsWith(&quot;java&quot;) &amp;&amp;
+					!this.knownSuperclasses.containsKey(superclass)) {
+				this.knownSuperclasses.put(superclass, configClass);
+				// Superclass found, return its annotation metadata and recurse
+				return sourceClass.getSuperClass();
+			}
+		}
+
+		// No superclass -&gt; processing is complete
+		return null;
+	}
+</code></pre>
+<p><strong><code>ConfigurationClassPostProcessor#processConfigBeanDefinitions</code> 加载bean定义信息</strong></p>
+<p><code>parse</code>解析导入数据中的import，即第一步<code>parse</code></p>
+
+              </div>
+              <div class="toc-container">
+                
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://hdfad.github.io/post/aqs-zong-jie/">
+              <h3 class="post-title">
+                AQS总结
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://hdfad.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

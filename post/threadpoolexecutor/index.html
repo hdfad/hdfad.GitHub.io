@@ -1,0 +1,860 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ThreadPoolExecutor-源码流程 | NOTES</title>
+<link rel="shortcut icon" href="https://hdfad.github.io/favicon.ico?v=1684988571723">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://hdfad.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="ThreadPoolExecutor-源码流程 | NOTES - Atom Feed" href="https://hdfad.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="
+线程池属性
+//ctl: 包含两个概念 低29位的工作线程数量和高3位的运行状态,初始值为11100000000000000000000000000000 | 0 =&gt; 1110000000000000000000000000000..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://hdfad.github.io">
+  <img class="avatar" src="https://hdfad.github.io/images/avatar.png?v=1684988571723" alt="">
+  </a>
+  <h1 class="site-title">
+    NOTES
+  </h1>
+  <p class="site-description">
+    
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/index.html" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              ThreadPoolExecutor-源码流程
+            </h2>
+            <div class="post-info">
+              <span>
+                2023-05-18
+              </span>
+              <span>
+                27 min read
+              </span>
+              
+            </div>
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <figure data-type="image" tabindex="1"><img src="https://hdfad.github.io/post-images/1684988471616.png" alt="" loading="lazy"></figure>
+<p><strong>线程池属性</strong></p>
+<pre><code class="language-java">//ctl: 包含两个概念 低29位的工作线程数量和高3位的运行状态,初始值为11100000000000000000000000000000 | 0 =&gt; 11100000000000000000000000000000 =&gt; -536870912
+//线程处于运行状态,工作数为0
+private final AtomicInteger ctl = new AtomicInteger(ctlOf(RUNNING, 0));
+//COUNT_BITS: 线程低29位,用于位移控制线程运行状态和容量
+private static final int COUNT_BITS = Integer.SIZE - 3;
+//线程池最大容量: 00000000000000000000000000000001 &lt;&lt; 29 = 00100000000000000000000000000000 - 1 =&gt; 00011111111111111111111111111111 =&gt;536870911
+private static final int CAPACITY   = (1 &lt;&lt; COUNT_BITS) - 1;
+
+//左移填充29位0，所以运行状态是以前3位表示
+
+// 运行状态,高3位111: -1&lt;&lt;29  =&gt; 11111111111111111111111111111111 &lt;&lt;29 =&gt; 11100000000000000000000000000000
+private static final int RUNNING    = -1 &lt;&lt; COUNT_BITS;
+//停止状态,高3位000: 不再接收新任务，会继续处理正在执行的任务和阻塞队列中的任务
+private static final int SHUTDOWN   =  0 &lt;&lt; COUNT_BITS;
+//终止状态,高3位001: 不接收新任务同时会终止正在执行的任务和阻塞队列中的任务 00000000000000000000000000000001&lt;&lt;29 =&gt; 00100000000000000000000000000000
+private static final int STOP       =  1 &lt;&lt; COUNT_BITS;
+//过渡状态,高3位010: 线程结束前的状态 00000000000000000000000000000010&lt;&lt;29 =&gt; 01000000000000000000000000000000
+private static final int TIDYING    =  2 &lt;&lt; COUNT_BITS;
+//过渡状态,高3位011: 线程结束前的状态 00000000000000000000000000000011&lt;&lt;29 =&gt; 01100000000000000000000000000000
+private static final int TERMINATED =  3 &lt;&lt; COUNT_BITS;
+
+// 线程运行状态，上述5种状态,~CAPACITY=11100000000000000000000000000000,高位111,
+private static int runStateOf(int c)     { return c &amp; ~CAPACITY; }
+/*
+ * 当前线程池线程数量,包括正在执行的线程和等待任务的worker CAPACITY的高3位是000,所以ctl的高3位是任意状态的值'&amp;' 000都是000,低29位是1,'&amp;'时有1便是1,所以低29位用于表示线程的工作线程数
+ * 与workers中的任务不同的是,这个统计的是正在执行和阻塞等待的任务,workers中的任务是正在执行的任务和已经执行完成的但还没来得及被移除的任务
+*/
+private static int workerCountOf(int c)  { return c &amp; CAPACITY; }
+// 通过|运算获取ctl中的线程状态,高3位,因为rs是运行状态
+private static int ctlOf(int rs, int wc) { return rs | wc; }
+</code></pre>
+<p><strong>线程池7个所需初始参数</strong></p>
+<pre><code class="language-java">/*
+ * 核心线程允许为0,最大线程数不允许&lt;=0,最大线程数不允许小于核心线程数,活跃时间不能小于0,线程工厂、阻塞队列，拒绝策略都不允许为null
+ * 默认的线程工厂: new DefaultThreadFactory();
+ * 默认拒绝策略: RejectedExecutionHandler defaultHandler =  new AbortPolicy(); 该策略下,直接丢弃任务,并抛出RejectedExecutionException异常
+ * 有些设置可能可以跳过这个进行修改,后面验证 todo
+ * corePoolSize: 线程核心参数 
+ * maximumPoolSize: 最大线程数
+ * keepAliveTime: 最大线程数活跃时间
+ * unit: 活跃时间单位
+ * workQueue: 阻塞队列
+ * threadFactory: 线程工厂
+ * handler: 拒绝策略
+*/
+public ThreadPoolExecutor(int corePoolSize,
+                              int maximumPoolSize,
+                              long keepAliveTime,
+                              TimeUnit unit,
+                              BlockingQueue&lt;Runnable&gt; workQueue,
+                              ThreadFactory threadFactory,
+                              RejectedExecutionHandler handler) {
+				/*
+				 * 线程核心参数&lt;0 || 最大线程数&lt;=0 || 最大线程数&lt;核心线程数 || maximumPoolSize中线程活跃时间&lt;0 
+				 * 都将抛出非法参数异常
+				*/
+        if (corePoolSize &lt; 0 ||
+            maximumPoolSize &lt;= 0 ||
+            maximumPoolSize &lt; corePoolSize ||
+            keepAliveTime &lt; 0)
+            throw new IllegalArgumentException();
+				/*
+				 * 阻塞队列、线程工厂、拒绝策略都不能为null
+				 * 
+				*/
+        if (workQueue == null || threadFactory == null || handler == null)
+            throw new NullPointerException();
+	      ...
+    }
+</code></pre>
+<h3 id="执行线程的方式execute-submit"><strong>执行线程的方式：execute、submit</strong></h3>
+<p><strong>一、execute: 提交任务并执行</strong></p>
+<p>如果工作线程&lt;核心线程,就通过addWorker添加一个核心线程去处理任务</p>
+<p>如果工作线程≥核心线程,向正在运行的线程池中的阻塞队列中添加一个任务(即:任务入队)</p>
+<p>入队成功后检查线程的运行状态,防止线程池添加任务后被停止,如果被停止就将添加的任务移除,并执行拒绝策略</p>
+<p>如果线程池的状态没问题检查工作线程数,若工作线程数为0,就addWorker添加一个非核心线程的空任务去处理阻塞队列中的任务<br>
+若入队失败就addWorker添加一个非核心的线程去去除当前任务</p>
+<p>失败就执行拒绝策略</p>
+<p><strong>addWorker相关处理任务</strong></p>
+<p>addWorker(task,true): 使用核心线程处理task任务</p>
+<p>addWorker(task,false): 使用非核心的线程去处理task任务</p>
+<p>addWorker(null,false): 使用非核心的线程去处理阻塞队列中的任务</p>
+<pre><code class="language-java">/**
+ * 1.若工作线程数&lt;核心线程 就添加核心线程运行
+ * 2.添加失败或者工作线程数&gt;核心线程就进行入队操作，,入队成功后还会检查线程池是否处于运行状态,非运行状态则执行拒绝策略
+ * 3.若队列已满就添加非核心线程运行,添加失败就执行拒绝策略
+ */
+public void execute(Runnable command) {
+				//任务不能为null
+        if (command == null)  throw new NullPointerException();
+				//初始状态
+        int c = ctl.get();
+				/*
+				 * 工作线程数&lt;核心线程 就添加核心线程运行
+				 * 工作线程的数量&lt;核心线程数量,就进行addWorker
+				 * 工作线程的数量，通过ctl &amp; CAPACITY
+				 * 11100000000000000000000000000000 &amp; 00011111111111111111111111111111 =&gt; 0 
+				*/
+        if (workerCountOf(c) &lt; corePoolSize) {
+						//添加工作线程并开始运行,true:核心线程,false:非核心线程,成功则直接返回,不成功则进行后续流程，进行入队或者执行拒绝策略
+            if (addWorker(command, true))
+                return;
+            c = ctl.get();
+        }
+				/*
+				 * 尝试入队,若队列已满,则入队失败
+				 * isRunning: 根据ctl判断线程池是否在运行状态,-1为运行状态
+				 * offer: 将任务插入到阻塞队列中
+				*/
+        if (isRunning(c) &amp;&amp; workQueue.offer(command)) {
+            int recheck = ctl.get();
+						/*
+						 * 重新获取线程池状态,防止线程池状态被其他线程改变
+						 * 如果线程池非运行状态就移除任务,todo
+						*/						
+            if (! isRunning(recheck) &amp;&amp; remove(command))
+								//执行拒绝策略
+                reject(command);
+						/*
+						 * 正在Running状态的线程工作数量&gt;=核心线程数量,入队成功后检查线程池中的工作线程为0时就会通过addWorker添加一个非核心的空任务
+						 * 目的是为了使用非核心的线程去处理阻塞队列中的任务,防止线程停止后当前没有能够处理任务的线程了
+						 * 因为task传的null,所以会通过getTask方法从阻塞队列中获取任务,core值为false,即:非核心线程处理任务
+						 * 
+						 * 指定的核心线程数为0时,队列未满入队成功的情况下且线程还在运行中,就会进入到此
+						*/
+            else if (workerCountOf(recheck) == 0)
+                addWorker(null, false);
+        }
+				/*
+				 * 入队失败,执行添加非核心线程工作
+				 * 失败就执行拒绝策略
+				*/	
+        else if (!addWorker(command, false))
+            reject(command);
+    }
+</code></pre>
+<p><strong>二、submit</strong></p>
+<p>这个方法就不是ThreadPoolExecutor的方法了，它是AbstractExecutorService中的方法，这个方法最终还是会调用ThreadPoolExecutor中的execute方法</p>
+<pre><code class="language-java">public Future&lt;?&gt; submit(Runnable task) {
+				//任务不允许为null
+        if (task == null) throw new NullPointerException();
+				//将任务封装成一个RunnableFuture
+        RunnableFuture&lt;Void&gt; ftask = newTaskFor(task, null);
+				//execute
+        execute(ftask);
+        return ftask;
+    }
+</code></pre>
+<p><strong>Worker</strong></p>
+<p>线程池的内部类，表示活跃的工作线程，继承了AQS，对运行的线程获取提供锁的操作，外部线程池中通过workers来表示正在活跃的线程集合，提供线程执行的run方法</p>
+<pre><code class="language-java">//活跃的工作线程
+private final HashSet&lt;Worker&gt; workers = new HashSet&lt;Worker&gt;();
+
+private final class Worker extends AbstractQueuedSynchronizer implements Runnable{
+        //工作线程
+        final Thread thread;
+        //初始任务
+        Runnable firstTask;
+        //参与工作任务的线程线程任务计数器
+        volatile long completedTasks;
+
+        /**
+         * 
+         * 初始化Worker,设置state的状态为-1
+         */
+        Worker(Runnable firstTask) {
+            setState(-1); // inhibit interrupts until runWorker
+            this.firstTask = firstTask;
+            this.thread = getThreadFactory().newThread(this);
+        }
+
+        /** 
+				 * 线程run方法
+			  */
+        public void run() {
+            runWorker(this);
+        }
+
+        //AQS-state状态,&gt;0已获取锁资源
+        protected boolean isHeldExclusively() {
+            return getState() != 0;
+        }
+
+				//AQS尝试获取锁并将exclusiveOwnerThread设置为当前线程
+        protected boolean tryAcquire(int unused) {
+            if (compareAndSetState(0, 1)) {
+                setExclusiveOwnerThread(Thread.currentThread());
+                return true;
+            }
+            return false;
+        }
+
+				//AQS锁释放
+        protected boolean tryRelease(int unused) {
+            setExclusiveOwnerThread(null);
+            setState(0);
+            return true;
+        }
+				
+				/*
+				* 锁
+				*/
+        public void lock()        { acquire(1); }
+        public boolean tryLock()  { return tryAcquire(1); }
+        public void unlock()      { release(1); }
+        public boolean isLocked() { return isHeldExclusively(); }
+
+				/*
+				* 打断已启动的当前线程
+				* 调用的还是线程的interrupt
+				* 补充:
+				* 如果线程正在获取锁或释放锁,如:lock.lock();lock.unlock();此时能够直接打断线程,抛出InterruptedException,
+				* 但是已经获取到了锁资源,且没释放锁,这个过程中如果没有允许被打断的方法,如sleep()外整个过程不会执行打断流程,会等到锁的释放后再执行打断
+				* synchronized同理
+				* 打断不是一定会执行,只是向目标线程发出一个中断请求，具体是否能够中断目标线程的执行，取决于目标线程是否能够正确地响应中断请求,有可能直到线程结束也不会被打断
+				* 线程是否被打断通过isInterrupted可以判断
+				*/
+        void interruptIfStarted() {
+            Thread t;
+						//线程池的状态处于非运行状态且未被中断，就执行线程打断
+            if (getState() &gt;= 0 &amp;&amp; (t = thread) != null &amp;&amp; !t.isInterrupted()) {
+                try {
+                    t.interrupt();
+                } catch (SecurityException ignore) {
+                }
+            }
+        }
+    }
+</code></pre>
+<p><strong>addWorker ：添加并启动任务,如果线程处于</strong></p>
+<p>core : true 核心线程，false 非核心</p>
+<p>首先判断当前任务能否被执行，如果线程池处于非运行状态且阻塞队列中的任务已为null，此时再传入任务，会被拒绝，返回false。如果当前的工作线程已超过最大线程，或者当前需要执行调用的是核心/非核心线程任务，判断当前的工作线程是否超过了核心/非核心线程，若不满足则返回false，拒绝添加任务。</p>
+<p>如果上述条件不满足，运行线程前会通过cas对工作线程数+1(ctl+1),开始准备运行当前任务</p>
+<p>将线程任务封装成worker添加到workers集合中，最后调用run方法启动线程</p>
+<pre><code class="language-java">//线程池中正在活动的线程集合,整个worker的操作都在锁中进行
+private final HashSet&lt;Worker&gt; workers = new HashSet&lt;Worker&gt;();
+
+//线程池达到的最大任务值
+private int largestPoolSize;
+
+//添加任务并运行
+private boolean addWorker(Runnable firstTask, boolean core) {
+        retry:
+        for (;;) {
+						//获取ctl,根据ctl获取正在运行的线程数和线程池状态
+            int c = ctl.get();
+						//运行状态
+            int rs = runStateOf(c);
+
+						/*
+						 * 作用:判断是否添加新任务执行,当线程调用shutdown或者shutdownNow时,状态会变成&gt;=SHUTDOWN的状态,所以新加任务时如果状态为SHUTDOWN ,firstTask!=null,就会拒绝添加任务, 当任务是stop状态时,也会直接返回false,拒绝任务添加
+						 * 线程非运行状态且任务非null、队列是null的条件下添加失败,返回false
+             * 可以理解成线程池非运行状态，此时队列已是null，再通过addWorker添加执行任务，会被拒绝
+						 * 
+						 */
+            if (rs &gt;= SHUTDOWN &amp;&amp; ! (rs == SHUTDOWN &amp;&amp; firstTask == null &amp;&amp; ! workQueue.isEmpty()))
+                return false;
+
+            for (;;) {
+								/*
+								 * 线程池中的工作线程数大于等于最大容量或者大于等于核心/非核心线程数,就拒绝添加任务
+								 * 如果&gt;=最大容量 || 工作线程数量&gt;运行的线程数,核心的取核心线程,非核心的取最大线程
+								*/
+                int wc = workerCountOf(c);
+								//工作线程数&gt;=最大容量 || 工作线程数&gt;线程数(当前线程是否是核心线程?核心线程:最大线程)
+                if (wc &gt;= CAPACITY || wc &gt;= (core ? corePoolSize : maximumPoolSize))
+                    return false;
+								//通过cas对ctl+1 =&gt; 11100000000000000000000000000000+1 =&gt; 11100000000000000000000000000001 (取补码+1 =&gt; 00011111111111111111111111111110 +1 =&gt; 00011111111111111111111111111111)
+                if (compareAndIncrementWorkerCount(c))
+										//返回到外层for循环retry
+                    break retry;
+								//重新获取ctl
+                c = ctl.get(); 
+								//获取当前线程运行状态,如果状态没变化,就跳出当前循环进行下次循环
+                if (runStateOf(c) != rs)
+                    continue retry;
+                // else CAS failed due to workerCount change; retry inner loop
+            }
+        }
+
+				//worker开始状态
+        boolean workerStarted = false;
+				//worker添加状态
+        boolean workerAdded = false;
+        Worker w = null;
+        try {
+						//初始化worker，封装当前线程资源,此处封装后提供run方法
+            w = new Worker(firstTask);
+						//获取当前线程
+            final Thread t = w.thread;
+            if (t != null) {
+								//加锁
+                final ReentrantLock mainLock = this.mainLock;
+                mainLock.lock();
+                try {
+	                  /*
+										 * 获取当前线程池运行状态 
+										 * ctl此时通过cas做了+1操作 
+										 * ctl &amp; ~CAPACITY =&gt; 11100000000000000000000000000001 &amp; ~00011111111111111111111111111111 =&gt; 11100000000000000000000000000000+1 =&gt; 00100000000000000000000000000000
+										 */
+                    int rs = runStateOf(ctl.get());
+										//判断是否是运行状态 || (是SHUTDOWN状态,但是当前线程任务为null)
+                    if (rs &lt; SHUTDOWN ||
+                        (rs == SHUTDOWN &amp;&amp; firstTask == null)) {
+												//当前线程是属于启动状态,此时线程池就不能再启动此任务，抛出异常
+                        if (t.isAlive()) 
+                            throw new IllegalThreadStateException();
+												//当前worker添加到工作线程集合中
+                        workers.add(w);
+												//获取工作线程集合
+                        int s = workers.size();
+												//largestPoolSize:以达到的最大线程池数量
+                        if (s &gt; largestPoolSize)
+                            largestPoolSize = s;
+												//添加任务成功
+                        workerAdded = true;
+                    }
+                } finally {
+                    mainLock.unlock();
+                }
+								//如果添加状态是true,开始执行线程,worker开始状态为true
+                if (workerAdded) {
+										//启动线程,调用任务的run方法
+                    t.start();
+                    workerStarted = true;
+                }
+            }
+        } finally {
+						//如果线程worker开始状态为false,从workers中移除当前worker,并递减数量
+            if (! workerStarted)
+                addWorkerFailed(w);
+        }
+        return workerStarted;
+    }
+</code></pre>
+<p><strong>runWorker 获取工作线程并执行或回收工作线程</strong></p>
+<p>通过runWorker运行线程任务，当有传入任务时会执行传入任务，没有传入任务时会通过getTask从阻塞队列中获取任务，如果获取超时、失败或者需要回收任务时，会退出当前执行线程任务</p>
+<p>获取成功或有任务传入时在执行任务前后会有前后钩子方法执行</p>
+<p>何时调用的呢？</p>
+<pre><code class="language-java">final void runWorker(Worker w) {
+		//当前请求线程
+    Thread wt = Thread.currentThread();
+		//worker中的第一个任务
+    Runnable task = w.firstTask;
+    w.firstTask = null;
+		//unlock 初始时,实例化worker时指定了线程的状态值为-1,此处并非是为了释放锁,而是为了将线程的state值变为0,方便后续的lock操作
+    w.unlock(); 
+		//运行中是否出现未被捕获到的异常(while内运行异常,且未被捕获),如在钩子方法beforeExecute、afterExecute时抛出异常,那么这个值就为true
+    boolean completedAbruptly = true;
+    try {
+				//获取任务,如果外部传入的任务是null,则说明这个任务需要从阻塞队列中获取
+        while (task != null || (task = getTask()) != null) {
+						//加锁
+            w.lock();
+            //线程的运行状态&gt;=STOP(1) =&gt;线程是非运行状态,打断当前线程执行
+            if ((runStateAtLeast(ctl.get(), STOP) ||
+                 (Thread.interrupted() &amp;&amp;
+                  runStateAtLeast(ctl.get(), STOP))) &amp;&amp;
+                !wt.isInterrupted())
+                wt.interrupt();
+            try {
+								//执行前 和 执行后的前后置方法
+                beforeExecute(wt, task);
+                Throwable thrown = null;
+                try {
+										//启动线程
+                    task.run();
+                } catch (RuntimeException x) {
+                    thrown = x; throw x;
+                } catch (Error x) {
+                    thrown = x; throw x;
+                } catch (Throwable x) {
+                    thrown = x; throw new Error(x);
+                } finally {
+										//后置方法
+                    afterExecute(task, thrown);
+                }
+            } finally {
+								//线程执行完后将当前任务置为null
+                task = null;
+								//线程任务计数器+1
+                w.completedTasks++;
+							 /*
+								* 释放锁
+								* state变成0,此时的worker处于0的状态,通过外部获取worker时,此任务的worker依然存在，但是state值为0,这就是getActiveCount获取正在活跃的线程时state必须&gt;0的原因
+								*/
+                w.unlock();
+            }
+        }
+				//正常执行后未抛出任何异常,将值变成true
+        completedAbruptly = false;
+    } finally {
+				//结束worker
+        processWorkerExit(w, completedAbruptly);
+    }
+}
+</code></pre>
+<p><strong>getTask：自旋从阻塞队列中获取任务或者回收多余线程资源</strong></p>
+<p>如果判断需要进行回收线程就判断若工作线程&gt;1(防止回收完了就没执行线程了)或者任务队列为null就compareAndDecrementWorkerCount对工作线程数-1</p>
+<p><strong>以下情况将不再获取任务：</strong></p>
+<p>1.线程池处于stop状态或者线程池是shutdown状态但是队列中的任务已经为null</p>
+<p>2.需要回收线程条件满足时</p>
+<p><strong>如何判断是否应该减少线程池中的线程数量？</strong></p>
+<p>根据配置是否回收核心线程,需要回收核心线程timed的标识就是true,若不需要回收核心线程就判断当前工作线程是否大于核心线程,大于timed值也为true</p>
+<p>当timed值为true时即为需要回收线程,阻塞指定时间从队列中获取任务,未获取任务timedOut值为false,进入下次自旋</p>
+<p>下次自旋时工作线程数&gt;1或者阻塞队列为null时就通过cas对工作线程数-1,返回null任务给runWorker</p>
+<p>队列为null或工作线程数&gt;1是为了防止移除完了工作线程没有线程来处理任务</p>
+<p><strong>工作线程数&gt;最大线程数何时可以成立？</strong></p>
+<p>从外部线程执行器setCorePoolSize比maximumPoolSize值小的值就会出现最大线程数小于核心线程数的问题。从而导致工作线程数&gt;最大线程数</p>
+<pre><code class="language-java">/**
+ * If false (default), core threads stay alive even when idle.
+ * If true, core threads use keepAliveTime to time out waiting
+ * for work.
+ * 是否回收核心线程池,true=&gt;使用keepAliveTime进行回收,false=&gt;默认值,不进行回收
+ */
+private volatile boolean allowCoreThreadTimeOut;
+
+private Runnable getTask() {
+				//上次轮询时从阻塞队列中获取线程超时标识
+        boolean timedOut = false; 
+
+        for (;;) {
+						//线程池信息
+            int c = ctl.get();
+						//从线程池信息中获取运行状态
+            int rs = runStateOf(c);
+
+						/*
+						 * 判断是否不再获取任务：线程状态&gt;=stop状态(1) || 线程状态&gt;=0 且 阻塞队列是null  
+						 * 即线程池不再接收新任务或者线程时stop状态,会执行已提交的任务,但是队列任务已经执行完了,就直接返回null并ctl-1
+						 */
+            if (rs &gt;= SHUTDOWN &amp;&amp; (rs &gt;= STOP || workQueue.isEmpty())) {
+								//线程计数器-1
+                decrementWorkerCount();
+                return null;
+            }
+						
+						//获取工作的线程数量
+            int wc = workerCountOf(c);
+
+						/*
+						 * 淘汰线程的标识,如果配置了允许核心线程淘汰(allowCoreThreadTimeOut(true))或者当前工作线程数&gt;核心线程数,那么就会使用workQueue.poll阻塞去取keepAliveTime纳秒时间的任务,取不到直接返回null
+						 */
+            boolean timed = allowCoreThreadTimeOut || wc &gt; corePoolSize;
+
+					 /*
+						* 工作线程数&gt;最大线程数 或者 需要淘汰线程且获取队列任务时超时的情况下有任务线程正在执行 或者 队列任务已经为null 就对ctl-1,再返回null任务
+						* 工作线程数&gt;最大线程数 || (需要淘汰线程 &amp;&amp; 上次自旋获取任务超时) 
+						* &amp;&amp; (工作线程数&gt;1 || 阻塞队列是空)
+						* 上述都满足就cas对ctl数-1，成功就返回null任务,等待后续流程将工作任务移除
+						* 就不在获取任务
+						*/
+            if ((wc &gt; maximumPoolSize || (timed &amp;&amp; timedOut))
+                &amp;&amp; (wc &gt; 1 || workQueue.isEmpty())) {
+                if (compareAndDecrementWorkerCount(c))
+                    return null;
+                continue;
+            }
+
+            try {
+								/*
+								* timed 为true则证明有任务线程需要淘汰,阻塞指定时间内拿不到任务就结束自此循环,
+								* 进入下次循环,下次循环时time值为true,timeOut值为true,当工作线程&gt;1或者任务队列已为空时就通过cas对工作线程数-1,返回null
+								* 不需要进行线程回收就阻塞等待队列中的任务,然后返回任务
+								* poll: 指定时间内取出队首的第一个元素,超时返回null
+								* take: 阻塞等待取出队首的第一个元素
+								*/
+                Runnable r = timed ?
+                    workQueue.poll(keepAliveTime, TimeUnit.NANOSECONDS) :
+                    workQueue.take();
+                if (r != null)
+                    return r;
+                timedOut = true;
+            } catch (InterruptedException retry) {
+                timedOut = false;
+            }
+        }
+    }
+</code></pre>
+<p><strong>判断回收线程:</strong></p>
+<pre><code class="language-java">		
+ /*
+	* 淘汰线程的标识,如果配置了允许核心线程淘汰(allowCoreThreadTimeOut(true))或者当前工作线程数&gt;核心线程数,那么就会使用workQueue.poll阻塞去取keepAliveTime纳秒时间的任务,取不到直接返回null
+	*/
+	boolean timed = allowCoreThreadTimeOut || wc &gt; corePoolSize;
+
+ /*
+	* 工作线程数&gt;最大线程数 或者 需要淘汰线程且获取队列任务时超时的情况下工作线程数&gt;1 或者 队列任务已经为null 就对ctl-1,再返回null任务
+	* 工作线程数&gt;最大线程数 || 需要淘汰线程 &amp;&amp; 上次自旋获取任务超时) 
+	* &amp;&amp; (工作线程数&gt;1 || 阻塞队列是空)
+	* 上述都满足就cas对ctl数-1，成功就返回null任务,等待后续流程将工作任务移除
+	* 就不在获取任务
+	*/
+  if ((wc &gt; maximumPoolSize || (timed &amp;&amp; timedOut))
+      &amp;&amp; (wc &gt; 1 || workQueue.isEmpty())) {
+      if (compareAndDecrementWorkerCount(c))
+          return null;
+      continue;
+  }
+</code></pre>
+<p><strong>getActiveCount: 获取正在活跃的线程，从workers中获取worker的state状态不为0的，整个获取流程互斥加锁</strong></p>
+<p><strong>为什么要判断w.isLocked()即: state≠0呢？</strong></p>
+<p>因为在线程addWorker时初始化的worker的state值为-1，runWorker时会先调用unlock操作，但是此时的unlock并不是真的解锁，而是为了让state的值变为0</p>
+<p><strong>线程池中worker的state运行过程中何时变成0？</strong></p>
+<p>在进入runWorker时，此处的0只是为了后续加锁操作，当加锁后又会又释放锁的时候，释放锁到调用结束当前线程任务方法时也会有一段时间，此时的worker的state也处于0的状态</p>
+<pre><code class="language-java">public int getActiveCount() {
+        final ReentrantLock mainLock = this.mainLock;
+        mainLock.lock();
+        try {
+            int n = 0;
+            for (Worker w : workers)
+								//state!=0的才算活跃的线程,addworker时初始化的值是-1,在runWorker时首先会调用worker的unlock,并不是为了解锁，是为了将初始化时-1的state状态回到0的状态
+                if (w.isLocked())
+                    ++n;
+            return n;
+        } finally {
+            mainLock.unlock();
+        }
+    }
+</code></pre>
+<p><strong>线程任务结束processWorkerExit</strong></p>
+<p>当任务获取超时需要回收或者线程将要结束时会退出getTsk自旋获取任务,执行线程结束任务</p>
+<p>结束任务会从worker中移除自己的任务,并调用扩展方法在Terminate前调用terminated();</p>
+<p>最后判断是否需要新建一个非核心的空任务线程去处理阻塞队列中的任务</p>
+<pre><code class="language-java">private void processWorkerExit(Worker w, boolean completedAbruptly) {
+				//如果线程池runWorker运行任务时出现异常,此时会出现没来得及清理，这里进行清理工作线程数
+        if (completedAbruptly) 
+            decrementWorkerCount();
+
+        final ReentrantLock mainLock = this.mainLock;
+        mainLock.lock();
+        try {
+						//全局线程已执行任务
+            completedTaskCount += w.completedTasks;
+						//将任务从workers中移除，之前addworker时添加了元素workers.add(w);
+            workers.remove(w);
+        } finally {
+            mainLock.unlock();
+        }
+				
+				//尝试终止线程,只有线程池处于shutdown状态且队列为null才会终止线程
+        tryTerminate();
+			
+				
+        int c = ctl.get();
+				//对阻塞队列中的任务进行补偿调用,线程池的状态&lt;stop(1) =&gt;SHUTDOWN\RUNNING
+        if (runStateLessThan(c, STOP)) {
+						//线程池任worker务运行正常
+            if (!completedAbruptly) {
+								/*
+								* 获取最小线程数
+								* 根据allowCoreThreadTimeOut,判断最小线程数应该取corePoolSize还是0
+								* 如果allowCoreThreadTimeOut设置为true,则允许核心线程超时回收,则最小线程是0,否则就最小线程数就是核心线程
+								*/
+                int min = allowCoreThreadTimeOut ? 0 : corePoolSize;
+								//如果最小线程数为0但阻塞队列中还有任务存在，则需要保留一个线程执行任务
+                if (min == 0 &amp;&amp; ! workQueue.isEmpty())
+                    min = 1;
+								//工作线程&gt;最小线程数说明还有线程在执行任务,此时直接返回结束退出工作
+                if (workerCountOf(c) &gt;= min)
+                    return; // replacement not needed
+            }
+						//再创建一个非核心线程去处理阻塞队列中的任务
+            addWorker(null, false);
+        }
+    }
+</code></pre>
+<p><strong>设置淘汰核心线程方法</strong></p>
+<pre><code class="language-java">public void allowCoreThreadTimeOut(boolean value) {
+    if (value &amp;&amp; keepAliveTime &lt;= 0)
+        throw new IllegalArgumentException(&quot;Core threads must have nonzero keep alive times&quot;);
+    if (value != allowCoreThreadTimeOut) {
+        allowCoreThreadTimeOut = value;
+        if (value)
+            interruptIdleWorkers();
+    }
+}
+</code></pre>
+<p><strong>tryTerminate 尝试终止线程,只有线程池处于shutdown状态且队列为null才会终止线程</strong></p>
+<p>如果线程池状态是stop或shutdown且工作线程数为0的时候就终止线程,并打断所有线程,最终将状态设置为TERMINATED</p>
+<p>状态：先设置成TIDYING状态，再调用扩展方法terminated(),最后变成TERMINATED</p>
+<pre><code class="language-java">final void tryTerminate() {
+        for (;;) {
+            int c = ctl.get();
+						/*
+						 * 检测到线程池还处于正在运行或者马上停止了,或者进入了SHUTDOWN状态,阻塞队列中还有任务需要执行的情况下,不会尝试终止线程,返回false
+						 * 只有线程池处于shutdown状态且队列为null才会终止线程
+						*/
+            if (isRunning(c) ||
+                runStateAtLeast(c, TIDYING) ||
+                (runStateOf(c) == SHUTDOWN &amp;&amp; ! workQueue.isEmpty()))
+                return;
+						//到达此步的条件是线程池是STOP状态或者SHUTDOWN状态且队列是null,此时判断工作的线程数不是0就尝试打断当前执行线程(是0是怕打断后没线程来执行剩余任务了吗?)
+            if (workerCountOf(c) != 0) { // Eligible to terminate
+								//工作线程不为0就打断线程,ONLY_ONE=true只会打断一个,然后就退出了,不会打断所有的执行线程
+                interruptIdleWorkers(ONLY_ONE);
+                return;
+            }
+
+						//当线程池的状态是STOP状态或者SHUTDOWN状态且队列是null,并且线程池工作数为0,执行线程终止逻辑
+            final ReentrantLock mainLock = this.mainLock;
+            mainLock.lock();
+            try {
+								//通过cas将线程变成ctl变成010即TIDYING状态
+                if (ctl.compareAndSet(c, ctlOf(TIDYING, 0))) {
+                    try {
+												//钩子方法,在变成TERMINATED前进行扩展
+                        terminated();
+                    } finally {
+												//最终将ctl变成TERMINATED状态
+                        ctl.set(ctlOf(TERMINATED, 0));
+												//这一步目的是啥?为了唤醒阻塞的线程任务?
+                        termination.signalAll();
+                    }
+                    return;
+                }
+            } finally {
+                mainLock.unlock();
+            }
+            // else retry on failed CAS
+        }
+    }
+</code></pre>
+<h3 id="线程池中停止线程池的几种方法">线程池中停止线程池的几种方法</h3>
+<p><strong>shutdown:将状态转换为SHUTDOWN,runWorker和getTask流程会继续处理以后的任务,新任务会被拒绝</strong></p>
+<p>调用shutdown后,会通过cas将线程状态变为<code>SHUTDOWN</code>,当新线程任务通过execute或者submit提交时,在<code>addWorker</code>方法中获取到线程的状态是<code>SHUTDOWN</code>且传入的<code>firstTask</code>不为null,即:不是处理阻塞队列中的任务时,就会拒绝线程任务的添加</p>
+<pre><code class="language-java">public void shutdown() {
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        checkShutdownAccess();
+				//通过cas自旋将线程池状态转换为SHUTDOWN
+        advanceRunState(SHUTDOWN);
+				//打断正在执行的worker线程
+        interruptIdleWorkers();
+				//钩子方法,关闭后去处理的流程
+        onShutdown(); 
+    } finally {
+        mainLock.unlock();
+    }
+    tryTerminate();
+}
+
+/**
+ * ctl.compareAndSet(c, ctlOf(targetState, workerCountOf(c))) 将状态转换为SHUTDOWN并保留工作线程数
+ *
+ *
+*/
+private void advanceRunState(int targetState) {
+    for (;;) {
+        int c = ctl.get();
+				//如果线程池的状态是传入targetState状态就直接break,否则就通过cas将状态转换为targetState指定的状态
+        if (runStateAtLeast(c, targetState) ||
+            ctl.compareAndSet(c, ctlOf(targetState, workerCountOf(c))))
+            break;
+    }
+}
+</code></pre>
+<p><strong>shutdownNow:将状态转换为STOP,并且转移阻塞队列中的任务,整个流程不再接收新任务和不再执行已提交的任务</strong></p>
+<p>cas自旋将状态变成STOP,并打断正在执行的线程,,移除阻塞队列中的所有任务,所以,不会再处理阻塞中的任务,因为任务已为null,且状态变成了stop,当新任务来时addWorker时线程池状态为stop即≥SHUTDOWN,直接拒绝任务添加</p>
+<pre><code class="language-java">public List&lt;Runnable&gt; shutdownNow() {
+    List&lt;Runnable&gt; tasks;
+    final ReentrantLock mainLock = this.mainLock;
+    mainLock.lock();
+    try {
+        checkShutdownAccess();
+				//通过cas自旋将线程池状态转换为STOP
+        advanceRunState(STOP);
+				//打断正在执行的worker线程
+        interruptWorkers();
+				//移除所有阻塞队列中的任务
+        tasks = drainQueue();
+    } finally {
+        mainLock.unlock();
+    }
+    tryTerminate();
+    return tasks;
+}
+</code></pre>
+<p><strong>finalize:覆写了object中的方法,调用了shutdown方法</strong></p>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li>
+<ul>
+<li>
+<ul>
+<li><a href="#%E6%89%A7%E8%A1%8C%E7%BA%BF%E7%A8%8B%E7%9A%84%E6%96%B9%E5%BC%8Fexecute-submit"><strong>执行线程的方式：execute、submit</strong></a></li>
+<li><a href="#%E7%BA%BF%E7%A8%8B%E6%B1%A0%E4%B8%AD%E5%81%9C%E6%AD%A2%E7%BA%BF%E7%A8%8B%E6%B1%A0%E7%9A%84%E5%87%A0%E7%A7%8D%E6%96%B9%E6%B3%95">线程池中停止线程池的几种方法</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+          <div class="next-post">
+            <div class="next">下一篇</div>
+            <a href="https://hdfad.github.io/post/springboot-zi-dong-zhuang-pei-yuan-li/">
+              <h3 class="post-title">
+                Spring Boot 自动装配流程
+              </h3>
+            </a>
+          </div>
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://hdfad.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>

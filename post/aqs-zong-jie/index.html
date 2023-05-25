@@ -1,0 +1,361 @@
+<html>
+  <head>
+    <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AQS总结 | NOTES</title>
+<link rel="shortcut icon" href="https://hdfad.github.io/favicon.ico?v=1684988571723">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@2.3.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="stylesheet" href="https://hdfad.github.io/styles/main.css">
+<link rel="alternate" type="application/atom+xml" title="AQS总结 | NOTES - Atom Feed" href="https://hdfad.github.io/atom.xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Droid+Serif:400,700">
+
+
+
+    <meta name="description" content="juc包下的一个基类，用来构建锁或者同步器的底层框架，内部维护着一个FIFO的CLH的变种队列，将资源获取失败的线程添加到CLH队列中等待，配合每个线程持有的node对象和LockSupport的凭证完成对对象锁的获取释放和入队阻塞
+如对象..." />
+    <meta name="keywords" content="" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.10.0/katex.min.css">
+    <script src="//cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.5.1/build/highlight.min.js"></script>
+  </head>
+  <body>
+    <div class="main">
+      <div class="main-content">
+        <div class="site-header">
+  <a href="https://hdfad.github.io">
+  <img class="avatar" src="https://hdfad.github.io/images/avatar.png?v=1684988571723" alt="">
+  </a>
+  <h1 class="site-title">
+    NOTES
+  </h1>
+  <p class="site-description">
+    
+  </p>
+  <div class="menu-container">
+    
+      
+        <a href="/index.html" class="menu">
+          首页
+        </a>
+      
+    
+      
+        <a href="/archives" class="menu">
+          归档
+        </a>
+      
+    
+      
+        <a href="/tags" class="menu">
+          标签
+        </a>
+      
+    
+      
+        <a href="/post/about" class="menu">
+          关于
+        </a>
+      
+    
+  </div>
+  <div class="social-container">
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  </div>
+</div>
+
+        <div class="post-detail">
+          <article class="post">
+            <h2 class="post-title">
+              AQS总结
+            </h2>
+            <div class="post-info">
+              <span>
+                2023-05-10
+              </span>
+              <span>
+                10 min read
+              </span>
+              
+            </div>
+            
+            <div class="post-content-wrapper">
+              <div class="post-content" v-pre>
+                <p>juc包下的一个基类，用来构建锁或者同步器的底层框架，内部维护着一个FIFO的CLH的变种队列，将资源获取失败的线程添加到CLH队列中等待，配合每个线程持有的node对象和LockSupport的凭证完成对对象锁的获取释放和入队阻塞</p>
+<p>如对象ReentrantLock、CountdownLatch、Semaphore等底层都是由AQS实现的，</p>
+<p>结构：</p>
+<p>1.AQS内部维护着一个头尾节点Node，head头节点、tail尾节点，头尾节点的内部state值为0，thread值也为null，在AQS内部Node类中，又维护着当前节点的前后Node节点，prev前节点，next后节点</p>
+<p>2.AQS内部还有由一个volatile修饰全局的state变量，为0表示没有没有线程获取锁，非0表示该资源已有线程占用，值表示同一线程获取重入或共享锁次数的次数</p>
+<p>3.内部Node对象除前后节点外还描述着当前节点的锁属性</p>
+<p>3.1.锁的属性对象，共享锁shared、排他锁exclusive</p>
+<p>3.2.等待线程状态waitStatus，共有5种状态，初始状态为0，初始化后被线程所持有</p>
+<pre><code>cancelled(1): 在同步队列中等待的线程等待超时或被中断，需要从同步队列中取消该Node的节点, 其节点的waitStatus为CANCELLED，即结束状态，进入该状态后的结点将不会再变化阻塞,
+              锁获取成功后的取消锁获取cancelAcquire,会将状态变成1
+
+signal(-1): 节点进入阻塞状态,等待前节点释放,只有前置节点释放锁，才会通知标识为SIGNAL状态的后续节点的线程
+
+condition(-2): 与条件队列Condition有关,Condition的节点会被移到另一个等待队列中
+
+propagate(-3): 共享模式下使用,用于后节点的唤醒
+</code></pre>
+<p>3.3.持有当前节点的线程信息Thread</p>
+<p>4.父类AOS的exclusiveOwnerThread拥有当前锁的线程</p>
+<p>图：<a href="https://www.processon.com/diagraming/6459c8c67ca03d041ea333da">https://www.processon.com/diagraming/6459c8c67ca03d041ea333da</a></p>
+<h2 id="加锁操作">加锁操作：</h2>
+<h3 id="互斥锁的加锁">互斥锁的加锁</h3>
+<p><strong><code>acquire</code>:以独占锁的形式获取锁</strong></p>
+<pre><code class="language-java">    public final void acquire(int arg) {
+        if (!tryAcquire(arg) &amp;&amp;
+            acquireQueued(addWaiter(Node.EXCLUSIVE), arg))
+            selfInterrupt();
+    }
+
+</code></pre>
+<p><strong><code>tryAcquire</code>:尝试获取锁</strong></p>
+<p>内部提供一个模板方法，具体由子类再实现，成功则返回true，不再进行后续操作</p>
+<p><strong><code>addWaiter</code>:锁获取失败后进行入队操作</strong></p>
+<p>将当前争锁线程和锁模型封装成一个Node,</p>
+<p>如果存在尾节点，则尝试快速入队，将入队节点的前指针指向尾节点，</p>
+<p>然后通过cas把当前节点设置成尾节点，成功则将原尾节点的后指针指向当前入队的节点(即：现在的尾节点),就完成了节点前后指针的双向绑定，</p>
+<p>成功就完成入队，返回当前节点</p>
+<p>如果尾节点为空或者尾节点cas自旋失败即：快速入队失败，进行enq入队</p>
+<pre><code class="language-java">private Node addWaiter(Node mode) {
+    //当前争锁线程和锁模型封装成一个Node
+    Node node = new Node(Thread.currentThread(), mode);
+    //尾节点
+    Node pred = tail;
+    //如果存在尾节点，尝试快速入队，入队失败则后续cas入队
+    if (pred != null) {
+        //将当前入队节点的前指针指向尾节点
+        node.prev = pred;
+        //通过cas把当前节点设置成尾节点
+        if (compareAndSetTail(pred, node)) {
+            //成功则将之前尾节点的后指针指向当前入队的节点,此时入队的节点就成了尾节点
+            pred.next = node;
+            return node;
+        }
+    }
+    //尾节点为空或者尾节点cas自旋失败则进行enq入队
+    enq(node);
+    return node;
+}
+</code></pre>
+<p><strong><code>enq</code>:通过自旋的方式将请求node对象入队，添加到队列的尾节点上</strong></p>
+<p>如果不存在尾节点为，则通过cas的方式初始化头尾节点</p>
+<p>如果存在，或者初始化头尾节点完成，将当前入队节点的前指针指向尾节点，再通过cas将尾节点设置成当前节点</p>
+<p>成功则将之前尾节的后指针指向当前最新的尾节点，完成节点前后指针的双向绑定</p>
+<p>整个流程通过自旋一直到入队完成</p>
+<pre><code class="language-java">private Node enq(final Node node) {
+    for (;;) {
+        Node t = tail;
+        //不存在尾节点则cas初始化头尾节点
+        if (t == null) {
+            if (compareAndSetHead(new Node()))
+                tail = head;
+        } else {
+            node.prev = t;
+            //通过cas设置尾节点，成功后将当前入队节点设置成尾节点
+            if (compareAndSetTail(t, node)) {
+                t.next = node;
+                return t;
+            }
+        }
+    }
+}
+</code></pre>
+<p><strong><code>acquireQueued</code>:入队成功后通过acquireQueued方法自旋获取锁或者park等待</strong></p>
+<p>如果当前入队节点的上一个节点是头节点(可能此时之前拿锁的线程对象已经释放锁了)，则尝试tryAcquire获取锁，获取锁则当前锁的持有者就是当前线程，将当前节点设置成头节点，节点持有的线程设置为null，节点前指针为null，原头节点的后指针设置为null，等待GC，返回打断状态为false</p>
+<p>此处设置的是队列中的数据，锁的持有者靠AOS的exclusiveOwnerThread和AQS中的state共同标识完成，此处将队列中获取锁后的Node设置为头节点(头节点又叫哨兵节点，里面的持有者信息都是null)</p>
+<p>如果前节点非头节点或者拿锁失败了，就调用shouldParkAfterFailedAcquire根据状态判断当前线程是否应该被挂起，如果返回true，就park挂起线程</p>
+<pre><code class="language-java">final boolean acquireQueued(final Node node, int arg) {
+    boolean failed = true;
+    try {
+        //线程打断状态标识
+        boolean interrupted = false;
+        for (;;) {
+            //当前节点的前一个节点
+            final Node p = node.predecessor();
+            //上一个节点如果是头节点，则再次尝试获取锁，成功后将当前请求节点设置为头节点，原头节点指针指向null,等待GC
+            if (p == head &amp;&amp; tryAcquire(arg)) {
+                setHead(node);
+                p.next = null; // help GC
+                failed = false;
+                return interrupted;
+            }
+            //判断当前线程是否应该park挂起，如果前一个节点的waitStatus值为signal则parkAndCheckInterrupt挂起线程
+            if (shouldParkAfterFailedAcquire(p, node) &amp;&amp;
+                parkAndCheckInterrupt())
+                //线程节点挂起后线程打断状态设置为true
+                interrupted = true;
+        }
+    } finally {
+        if (failed)
+            cancelAcquire(node);
+    }
+}
+</code></pre>
+<p><strong><code>shouldParkAfterFailedAcquire</code>：如果前节点非头节点或者拿锁失败，则根据前节点状态判断当前线程是否应该被挂起</strong></p>
+<p>如果前节点状态是signal状态(-1)，则返回true，通过parkAndCheckInterrupt挂起线程</p>
+<p>如果前节点状态&gt;0 即:1 处于取消状态的节点,则移除这些等于1的节点,然后将不等于1状态的节点的后指针指向当前节点</p>
+<p>如果前节点状态&lt;=0 即:0,-2,-3,则通过cas将上一个节点waitStatus状态设置为-1,返回false</p>
+<p>因为外部调用在自旋,所以此时返回false时依旧继续自旋,重复acquireQueued流程,</p>
+<p>拿不到锁进入shouldParkAfterFailedAcquire时上一个节点的等待状态已由之前的cas设置成了-1 即signal,此时直接返回true</p>
+<p>然后进入parkAndCheckInterrupt将当前线程节点park等待</p>
+<p>整个流程来说通过自旋拿头节点后指针指向的线程节点去获取锁,成功则将此节点设置成哨兵节点,返回线程打断状态为false</p>
+<p>否则移除队列中所有节点中waitStatus=0的节点,最后请求node进入park状态等唤醒</p>
+<p>最后将返回线程打断状态为true</p>
+<pre><code class="language-java">private static boolean shouldParkAfterFailedAcquire(Node pred, Node node) {
+    int ws = pred.waitStatus;
+    if (ws == Node.SIGNAL)
+        //如果前节点waitStatus=-1,则直接返回true,线程节点进入park状态
+        return true;
+    //移除前驱节点waitStatus&gt;0的所有node
+    if (ws &gt; 0) {
+        do {
+            //如果前驱节点为取消状态，则前驱节点需要移除
+            node.prev = pred = pred.prev;
+        } while (pred.waitStatus &gt; 0);
+        pred.next = node;
+    } else {
+        //前节点&lt;0的状态则设置为-1,下次自旋时通过ws == Node.SIGNAL 直接返回true
+        compareAndSetWaitStatus(pred, ws, Node.SIGNAL);
+    }
+    return false;
+}
+</code></pre>
+<p>由此AQS的加锁状态完成,但是对于具体实现类有对应的tryAcquire逻辑,如ReentrantLock后续补充 todo</p>
+<h2 id="释放锁操作">释放锁操作</h2>
+<h3 id="互斥锁的资源释放">互斥锁的资源释放</h3>
+<p><strong><code>release</code>:释放锁 ，通过tryRelease释放</strong></p>
+<pre><code class="language-java">public final boolean release(int arg) {
+        if (tryRelease(arg)) {
+            Node h = head;
+            if (h != null &amp;&amp; h.waitStatus != 0)
+                unparkSuccessor(h);
+            return true;
+        }
+        return false;
+    }
+</code></pre>
+<p><strong><code>tryRelease</code>:尝试释放锁，AQS提供模板方法，具体锁释放逻辑由子类实现</strong><br>
+锁释放后，如果存在头节点且，头节点的等待状态不是0就调用<code>unparkSuccessor</code><br>
+为啥要!=0?<br>
+初始的头节点肯定是0,但是后续节点获取锁出队后被设置成头节点(哨兵节点)后节点的waitStatus状态并不会发生变化,<br>
+如果之前节点后还挂着数据,那么后节点会在shouldParkAfterFailedAcquire时将当前节点的waitStatus设置为signal状态,即!=0<br>
+所以不为0则后续可能还有节点挂着的</p>
+<p><strong><code>unparkSuccessor</code>: unpark唤起队列中第一个waitStatus状态&lt;=0的节点,并重置头节点状态为0</strong><br>
+如果头节点的后节点waitStatus不是&lt;=0则从队尾开始往前找,找到最前面的一个非&lt;=0的非头节点,然后unpark唤起park的节点</p>
+<pre><code class="language-java">//node:头节点
+private void unparkSuccessor(Node node) {
+
+    //头节点waitStatus状态
+    int ws = node.waitStatus;
+    if (ws &lt; 0)
+        //通过cas将头节点的waitStatus设置为0
+        compareAndSetWaitStatus(node, ws, 0);
+
+    /*
+     * 获取头节点后的第一个节点,如果节点是null或者后续节点的等待状态=1(线程等待被中断或等待超时,将要结束)
+     * 就从尾节点开始往前找,找到最前面满足条件的节点:即最前面waitStatus&lt;=0的节点
+     */
+    Node s = node.next;
+    if (s == null || s.waitStatus &gt; 0) {
+        s = null;
+        for (Node t = tail; t != null &amp;&amp; t != node; t = t.prev)
+            if (t.waitStatus &lt;= 0)
+                s = t;
+    }
+    //唤醒node队列中第一个&lt;=0的非头节点
+    if (s != null)
+        LockSupport.unpark(s.thread);
+}
+</code></pre>
+
+              </div>
+              <div class="toc-container">
+                <ul class="markdownIt-TOC">
+<li>
+<ul>
+<li><a href="#%E5%8A%A0%E9%94%81%E6%93%8D%E4%BD%9C">加锁操作：</a>
+<ul>
+<li><a href="#%E4%BA%92%E6%96%A5%E9%94%81%E7%9A%84%E5%8A%A0%E9%94%81">互斥锁的加锁</a></li>
+</ul>
+</li>
+<li><a href="#%E9%87%8A%E6%94%BE%E9%94%81%E6%93%8D%E4%BD%9C">释放锁操作</a>
+<ul>
+<li><a href="#%E4%BA%92%E6%96%A5%E9%94%81%E7%9A%84%E8%B5%84%E6%BA%90%E9%87%8A%E6%94%BE">互斥锁的资源释放</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+              </div>
+            </div>
+          </article>
+        </div>
+
+        
+
+        
+
+        <div class="site-footer">
+  
+  <a class="rss" href="https://hdfad.github.io/atom.xml" target="_blank">
+    <i class="ri-rss-line"></i> RSS
+  </a>
+</div>
+
+      </div>
+    </div>
+
+    <script>
+      hljs.initHighlightingOnLoad()
+
+      let mainNavLinks = document.querySelectorAll(".markdownIt-TOC a");
+
+      // This should probably be throttled.
+      // Especially because it triggers during smooth scrolling.
+      // https://lodash.com/docs/4.17.10#throttle
+      // You could do like...
+      // window.addEventListener("scroll", () => {
+      //    _.throttle(doThatStuff, 100);
+      // });
+      // Only not doing it here to keep this Pen dependency-free.
+
+      window.addEventListener("scroll", event => {
+        let fromTop = window.scrollY;
+
+        mainNavLinks.forEach((link, index) => {
+          let section = document.getElementById(decodeURI(link.hash).substring(1));
+          let nextSection = null
+          if (mainNavLinks[index + 1]) {
+            nextSection = document.getElementById(decodeURI(mainNavLinks[index + 1].hash).substring(1));
+          }
+          if (section.offsetTop <= fromTop) {
+            if (nextSection) {
+              if (nextSection.offsetTop > fromTop) {
+                link.classList.add("current");
+              } else {
+                link.classList.remove("current");    
+              }
+            } else {
+              link.classList.add("current");
+            }
+          } else {
+            link.classList.remove("current");
+          }
+        });
+      });
+
+    </script>
+  </body>
+</html>
